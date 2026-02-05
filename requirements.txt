@@ -6,4 +6,5 @@ faiss-cpu
 youtube-transcript-api>=1.0.0
 sentence-transformers
 groq
+PyPDF2
 numpy<2
