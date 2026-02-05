@@ -5,24 +5,20 @@ from langchain_core.embeddings import Embeddings
 from sentence_transformers import SentenceTransformer
 from youtube_transcript_api import YouTubeTranscriptApi
 from urllib.parse import urlparse, parse_qs
-from faster_whisper import WhisperModel
 from groq import Groq
-import yt_dlp
-import tempfile
-import os
 
 
-# ---------------- PAGE CONFIG ----------------
+# ---------------- PAGE ----------------
 st.set_page_config(page_title="Chat with YouTube FREE", layout="wide")
-st.title("📺 Chat with YouTube (100% FREE)")
+st.title("📺 Chat with YouTube (Free & Stable)")
 
 
 # ---------------- SIDEBAR ----------------
 with st.sidebar:
-    groq_key = st.text_input("Enter GROQ API Key (Free)", type="password")
+    groq_key = st.text_input("Enter GROQ API Key", type="password")
 
 
-# ---------------- SESSION STATE ----------------
+# ---------------- SESSION ----------------
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -30,7 +26,7 @@ if "vector_db" not in st.session_state:
     st.session_state.vector_db = None
 
 
-# ---------------- LOAD EMBEDDING MODEL ----------------
+# ---------------- EMBEDDING ----------------
 @st.cache_resource
 def load_embed_model():
     return SentenceTransformer("all-MiniLM-L6-v2")
@@ -42,9 +38,7 @@ def embed_text(texts):
     return embed_model.encode(texts).tolist()
 
 
-# ---------------- EMBEDDING CLASS ----------------
 class FreeEmbedding(Embeddings):
-
     def embed_documents(self, texts):
         return embed_text(texts)
 
@@ -52,7 +46,7 @@ class FreeEmbedding(Embeddings):
         return embed_text([text])[0]
 
 
-# ---------------- VIDEO ID EXTRACTION ----------------
+# ---------------- VIDEO ID ----------------
 def extract_video_id(url):
     parsed = urlparse(url)
 
@@ -62,7 +56,7 @@ def extract_video_id(url):
     return parse_qs(parsed.query).get("v", [None])[0]
 
 
-# ---------------- TRANSCRIPT FETCH ----------------
+# ---------------- TRANSCRIPT ----------------
 def get_transcript(video_id):
 
     ytt = YouTubeTranscriptApi()
@@ -78,53 +72,9 @@ def get_transcript(video_id):
     return " ".join([i.text for i in data])
 
 
-# ---------------- LOAD WHISPER ----------------
-@st.cache_resource
-def load_whisper():
-    return WhisperModel("base", compute_type="int8")
-
-whisper_model = load_whisper()
-
-
-# ---------------- WHISPER FALLBACK ----------------
-def whisper_fallback(video_url):
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-
-        audio_file = os.path.join(tmpdir, "audio.mp3")
-
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': audio_file,
-            'quiet': True
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([video_url])
-
-        segments, _ = whisper_model.transcribe(audio_file)
-
-        text = ""
-        for seg in segments:
-            text += seg.text + " "
-
-        return text
-
-
-# ---------------- CACHE TRANSCRIPT ----------------
-@st.cache_data
-def cached_transcript(video_id, url):
-
-    try:
-        return get_transcript(video_id)
-    except:
-        return whisper_fallback(url)
-
-
-# ---------------- CREATE VECTOR DB ----------------
+# ---------------- VECTOR DB ----------------
 def create_db(text):
 
-    # prevent extremely large transcripts
     if len(text) > 150000:
         text = text[:150000]
 
@@ -148,12 +98,21 @@ if st.button("Analyze"):
     if not vid:
         st.error("Invalid YouTube URL")
     else:
-        with st.spinner("Processing video..."):
+        with st.spinner("Fetching transcript..."):
+            try:
+                text = get_transcript(vid)
+                st.session_state.vector_db = create_db(text)
+                st.success("Video Ready!")
 
-            text = cached_transcript(vid, url)
-            st.session_state.vector_db = create_db(text)
-
-            st.success("Video Ready! Ask questions below.")
+            except Exception:
+                st.error(
+                    "❌ Transcript unavailable.\n\n"
+                    "Possible reasons:\n"
+                    "- Video has captions disabled\n"
+                    "- YouTube blocked cloud requests\n"
+                    "- Private / restricted video\n\n"
+                    "👉 Try another video."
+                )
 
 
 # ---------------- DISPLAY CHAT ----------------
@@ -162,7 +121,7 @@ for m in st.session_state.messages:
 
 
 # ---------------- CHAT ----------------
-if prompt := st.chat_input("Ask about the video"):
+if prompt := st.chat_input("Ask about video"):
 
     st.session_state.messages.append({"role": "user", "content": prompt})
     st.chat_message("user").write(prompt)
@@ -174,27 +133,20 @@ if prompt := st.chat_input("Ask about the video"):
 
             docs = st.session_state.vector_db.similarity_search(prompt, k=2)
 
-            if not docs:
-                st.warning("No relevant content found.")
-                st.stop()
-
-            # limit context size
-            context = "\n".join([d.page_content for d in docs])
-            context = context[:4000]
+            context = "\n".join([d.page_content for d in docs])[:4000]
 
             completion = client.chat.completions.create(
                 model="llama3-8b-8192",
                 messages=[
                     {
                         "role": "system",
-                        "content": "Answer ONLY using the provided transcript context."
+                        "content": "Answer only using transcript context."
                     },
                     {
                         "role": "user",
                         "content": f"Context:\n{context}\n\nQuestion:\n{prompt}"
                     }
                 ],
-                temperature=0.3,
                 max_tokens=500
             )
 
@@ -204,7 +156,7 @@ if prompt := st.chat_input("Ask about the video"):
             st.chat_message("assistant").write(reply)
 
         except Exception as e:
-            st.error("Groq request failed. Try shorter question or reload video.")
+            st.error("LLM request failed.")
             st.write(str(e))
 
     else:
