@@ -27,7 +27,7 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 
 
-# ---------------- EMBEDDINGS ----------------
+# ---------------- EMBEDDING MODEL ----------------
 @st.cache_resource
 def load_model():
     return SentenceTransformer("all-MiniLM-L6-v2")
@@ -40,6 +40,7 @@ def embed_text(texts):
 
 
 class FreeEmbedding(Embeddings):
+
     def embed_documents(self, texts):
         return embed_text(texts)
 
@@ -68,6 +69,7 @@ def get_transcript(video_id):
         transcript = transcript_list.find_generated_transcript(['en'])
 
     data = transcript.fetch()
+
     return " ".join([i.text for i in data])
 
 
@@ -76,12 +78,18 @@ def read_pdf(file):
     text = ""
 
     for page in reader.pages:
-        text += page.extract_text()
+        if page.extract_text():
+            text += page.extract_text()
 
     return text
 
 
+# ---------------- VECTOR DB ----------------
 def create_db(text):
+
+    # Token protection
+    if len(text) > 150000:
+        text = text[:150000]
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=800,
@@ -98,8 +106,8 @@ st.header("📚 Upload Study Material")
 
 youtube_url = st.text_input("YouTube Lecture URL")
 manual_notes = st.text_area("Paste Notes")
-uploaded_pdf = st.file_uploader("Upload PDF Notes", type=["pdf"])
-uploaded_txt = st.file_uploader("Upload TXT Notes", type=["txt"])
+uploaded_pdf = st.file_uploader("Upload PDF", type=["pdf"])
+uploaded_txt = st.file_uploader("Upload TXT", type=["txt"])
 
 
 if st.button("Process Study Material"):
@@ -112,9 +120,9 @@ if st.button("Process Study Material"):
             vid = extract_video_id(youtube_url)
             combined_text += get_transcript(vid)
         except:
-            st.warning("Could not fetch YouTube transcript.")
+            st.warning("Could not fetch transcript.")
 
-    # Manual notes
+    # Manual
     if manual_notes:
         combined_text += manual_notes
 
@@ -127,92 +135,91 @@ if st.button("Process Study Material"):
         combined_text += uploaded_txt.read().decode("utf-8")
 
     if combined_text.strip() == "":
-        st.error("Please provide some study material.")
+        st.error("Provide some study material")
     else:
         st.session_state.vector_db = create_db(combined_text)
-        st.success("Study Material Loaded!")
+        st.success("Material Loaded!")
 
 
-# ---------------- CHAT ----------------
-st.header("💬 Ask Study Questions")
+# ---------------- CHAT SECTION ----------------
+st.header("💬 Ask Questions")
 
 for msg in st.session_state.messages:
     st.chat_message(msg["role"]).write(msg["content"])
 
 
-if question := st.chat_input("Ask doubts / explain concept / generate notes"):
+if question := st.chat_input("Ask study doubt..."):
 
     st.session_state.messages.append({"role": "user", "content": question})
     st.chat_message("user").write(question)
 
     if st.session_state.vector_db and groq_key:
 
-        client = Groq(api_key=groq_key)
+        try:
+            client = Groq(api_key=groq_key)
 
-        docs = st.session_state.vector_db.similarity_search(question, k=2)
-        context = "\n".join([d.page_content for d in docs])[:4000]
+            docs = st.session_state.vector_db.similarity_search(question, k=2)
 
-        completion = client.chat.completions.create(
-            model="llama3-8b-8192",
-            messages=[
-                {
-                    "role": "system",
-                    "content":
-                    """
-                    You are a helpful study tutor.
-                    Explain concepts simply.
-                    Help students understand topics.
-                    """
-                },
-                {
-                    "role": "user",
-                    "content": f"Study Material:\n{context}\n\nQuestion:\n{question}"
-                }
-            ],
-            max_tokens=500
-        )
+            context = "\n".join([d.page_content for d in docs])[:3500]
 
-        reply = completion.choices[0].message.content
+            response = client.chat.completions.create(
+                model="llama3-8b-8192",
+                messages=[
+                    {
+                        "role": "system",
+                        "content":
+                        "You are a friendly tutor. Explain simply."
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Material:\n{context}\n\nQuestion:\n{question}"
+                    }
+                ],
+                max_tokens=500
+            )
 
-        st.session_state.messages.append({"role": "assistant", "content": reply})
-        st.chat_message("assistant").write(reply)
+            reply = response.choices[0].message.content
+
+            st.session_state.messages.append({"role": "assistant", "content": reply})
+            st.chat_message("assistant").write(reply)
+
+        except:
+            st.error("AI failed. Try smaller content.")
 
     else:
-        st.warning("Upload study material + Enter GROQ key")
+        st.warning("Upload material + Enter Groq key")
 
 
-# ---------------- EXTRA FEATURES ----------------
+# ---------------- STUDY TOOLS ----------------
 st.header("✨ Study Tools")
 
-if st.button("Generate Summary") and st.session_state.vector_db and groq_key:
+def generate_tool(prompt_text):
 
-    docs = st.session_state.vector_db.similarity_search("Give full summary", k=5)
-    context = "\n".join([d.page_content for d in docs])[:4000]
+    docs = st.session_state.vector_db.similarity_search(prompt_text, k=3)
+    context = "\n".join([d.page_content for d in docs])[:3500]
 
     client = Groq(api_key=groq_key)
 
-    summary = client.chat.completions.create(
+    result = client.chat.completions.create(
         model="llama3-8b-8192",
         messages=[
-            {"role": "user", "content": f"Summarize this:\n{context}"}
-        ]
+            {"role": "user", "content": context}
+        ],
+        max_tokens=400
     )
 
-    st.write(summary.choices[0].message.content)
+    return result.choices[0].message.content
+
+
+if st.button("Generate Summary") and st.session_state.vector_db and groq_key:
+    try:
+        st.write(generate_tool("Summarize"))
+    except:
+        st.error("Summary too large.")
 
 
 if st.button("Generate Quiz") and st.session_state.vector_db and groq_key:
-
-    docs = st.session_state.vector_db.similarity_search("Create quiz", k=5)
-    context = "\n".join([d.page_content for d in docs])[:4000]
-
-    client = Groq(api_key=groq_key)
-
-    quiz = client.chat.completions.create(
-        model="llama3-8b-8192",
-        messages=[
-            {"role": "user", "content": f"Create 5 quiz questions from:\n{context}"}
-        ]
-    )
-
-    st.write(quiz.choices[0].message.content)
+    try:
+        st.write(generate_tool("Create 5 quiz questions"))
+    except:
+        st.error("Quiz generation failed.")
