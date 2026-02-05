@@ -1,7 +1,7 @@
 import streamlit as st
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.embeddings import Embeddings
 from sentence_transformers import SentenceTransformer
 from youtube_transcript_api import YouTubeTranscriptApi
 from urllib.parse import urlparse, parse_qs
@@ -12,9 +12,9 @@ import tempfile
 import os
 
 
-# ---------------- PAGE ----------------
+# ---------------- PAGE CONFIG ----------------
 st.set_page_config(page_title="Chat with YouTube FREE", layout="wide")
-st.title("📺 Chat with YouTube (100% FREE Version)")
+st.title("📺 Chat with YouTube (100% FREE)")
 
 
 # ---------------- SIDEBAR ----------------
@@ -22,7 +22,7 @@ with st.sidebar:
     groq_key = st.text_input("Enter GROQ API Key (Free)", type="password")
 
 
-# ---------------- SESSION ----------------
+# ---------------- SESSION STATE ----------------
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -30,15 +30,29 @@ if "vector_db" not in st.session_state:
     st.session_state.vector_db = None
 
 
-# ---------------- EMBEDDING MODEL ----------------
-embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+# ---------------- CACHE EMBEDDING MODEL ----------------
+@st.cache_resource
+def load_embed_model():
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+embed_model = load_embed_model()
 
 
 def embed_text(texts):
     return embed_model.encode(texts).tolist()
 
 
-# ---------------- EXTRACT VIDEO ID ----------------
+# ---------------- LANGCHAIN EMBEDDING CLASS ----------------
+class FreeEmbedding(Embeddings):
+
+    def embed_documents(self, texts):
+        return embed_text(texts)
+
+    def embed_query(self, text):
+        return embed_text([text])[0]
+
+
+# ---------------- VIDEO ID EXTRACTION ----------------
 def extract_video_id(url):
     parsed = urlparse(url)
 
@@ -48,7 +62,7 @@ def extract_video_id(url):
     return parse_qs(parsed.query).get("v", [None])[0]
 
 
-# ---------------- TRANSCRIPT ----------------
+# ---------------- TRANSCRIPT FETCH ----------------
 def get_transcript(video_id):
 
     ytt = YouTubeTranscriptApi()
@@ -65,9 +79,14 @@ def get_transcript(video_id):
 
 
 # ---------------- WHISPER FALLBACK ----------------
-def whisper_fallback(video_url):
+@st.cache_resource
+def load_whisper():
+    return WhisperModel("base", compute_type="int8")
 
-    model = WhisperModel("base", compute_type="int8")
+whisper_model = load_whisper()
+
+
+def whisper_fallback(video_url):
 
     with tempfile.TemporaryDirectory() as tmpdir:
 
@@ -82,7 +101,7 @@ def whisper_fallback(video_url):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([video_url])
 
-        segments, _ = model.transcribe(audio_file)
+        segments, _ = whisper_model.transcribe(audio_file)
 
         text = ""
         for seg in segments:
@@ -91,24 +110,17 @@ def whisper_fallback(video_url):
         return text
 
 
-# ---------------- CACHE ----------------
+# ---------------- CACHE TRANSCRIPT ----------------
 @st.cache_data
 def cached_transcript(video_id, url):
+
     try:
         return get_transcript(video_id)
     except:
         return whisper_fallback(url)
 
 
-# ---------------- VECTOR DB ----------------
-class FreeEmbedding:
-    def embed_documents(self, texts):
-        return embed_text(texts)
-
-    def embed_query(self, text):
-        return embed_text([text])[0]
-
-
+# ---------------- CREATE VECTOR DB ----------------
 def create_db(text):
 
     splitter = RecursiveCharacterTextSplitter(
@@ -131,21 +143,21 @@ if st.button("Analyze"):
     if not vid:
         st.error("Invalid URL")
     else:
-        with st.spinner("Loading transcript..."):
+        with st.spinner("Processing Video..."):
 
             text = cached_transcript(vid, url)
             st.session_state.vector_db = create_db(text)
 
-            st.success("Video Ready!")
+            st.success("Video Ready! Ask questions below.")
 
 
-# ---------------- CHAT DISPLAY ----------------
+# ---------------- DISPLAY CHAT ----------------
 for m in st.session_state.messages:
     st.chat_message(m["role"]).write(m["content"])
 
 
 # ---------------- CHAT ----------------
-if prompt := st.chat_input("Ask about video"):
+if prompt := st.chat_input("Ask about the video"):
 
     st.session_state.messages.append({"role": "user", "content": prompt})
     st.chat_message("user").write(prompt)
