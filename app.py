@@ -30,7 +30,7 @@ if "vector_db" not in st.session_state:
     st.session_state.vector_db = None
 
 
-# ---------------- CACHE EMBEDDING MODEL ----------------
+# ---------------- LOAD EMBEDDING MODEL ----------------
 @st.cache_resource
 def load_embed_model():
     return SentenceTransformer("all-MiniLM-L6-v2")
@@ -42,7 +42,7 @@ def embed_text(texts):
     return embed_model.encode(texts).tolist()
 
 
-# ---------------- LANGCHAIN EMBEDDING CLASS ----------------
+# ---------------- EMBEDDING CLASS ----------------
 class FreeEmbedding(Embeddings):
 
     def embed_documents(self, texts):
@@ -78,7 +78,7 @@ def get_transcript(video_id):
     return " ".join([i.text for i in data])
 
 
-# ---------------- WHISPER FALLBACK ----------------
+# ---------------- LOAD WHISPER ----------------
 @st.cache_resource
 def load_whisper():
     return WhisperModel("base", compute_type="int8")
@@ -86,6 +86,7 @@ def load_whisper():
 whisper_model = load_whisper()
 
 
+# ---------------- WHISPER FALLBACK ----------------
 def whisper_fallback(video_url):
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -123,9 +124,13 @@ def cached_transcript(video_id, url):
 # ---------------- CREATE VECTOR DB ----------------
 def create_db(text):
 
+    # prevent extremely large transcripts
+    if len(text) > 150000:
+        text = text[:150000]
+
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200
+        chunk_size=800,
+        chunk_overlap=150
     )
 
     docs = splitter.create_documents([text])
@@ -141,9 +146,9 @@ if st.button("Analyze"):
     vid = extract_video_id(url)
 
     if not vid:
-        st.error("Invalid URL")
+        st.error("Invalid YouTube URL")
     else:
-        with st.spinner("Processing Video..."):
+        with st.spinner("Processing video..."):
 
             text = cached_transcript(vid, url)
             st.session_state.vector_db = create_db(text)
@@ -164,23 +169,43 @@ if prompt := st.chat_input("Ask about the video"):
 
     if st.session_state.vector_db and groq_key:
 
-        client = Groq(api_key=groq_key)
+        try:
+            client = Groq(api_key=groq_key)
 
-        docs = st.session_state.vector_db.similarity_search(prompt, k=3)
-        context = "\n".join([d.page_content for d in docs])
+            docs = st.session_state.vector_db.similarity_search(prompt, k=2)
 
-        completion = client.chat.completions.create(
-            model="llama3-8b-8192",
-            messages=[
-                {"role": "system", "content": f"Answer using this context:\n{context}"},
-                {"role": "user", "content": prompt}
-            ]
-        )
+            if not docs:
+                st.warning("No relevant content found.")
+                st.stop()
 
-        reply = completion.choices[0].message.content
+            # limit context size
+            context = "\n".join([d.page_content for d in docs])
+            context = context[:4000]
 
-        st.session_state.messages.append({"role": "assistant", "content": reply})
-        st.chat_message("assistant").write(reply)
+            completion = client.chat.completions.create(
+                model="llama3-8b-8192",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Answer ONLY using the provided transcript context."
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Context:\n{context}\n\nQuestion:\n{prompt}"
+                    }
+                ],
+                temperature=0.3,
+                max_tokens=500
+            )
+
+            reply = completion.choices[0].message.content
+
+            st.session_state.messages.append({"role": "assistant", "content": reply})
+            st.chat_message("assistant").write(reply)
+
+        except Exception as e:
+            st.error("Groq request failed. Try shorter question or reload video.")
+            st.write(str(e))
 
     else:
         st.warning("Analyze video + enter Groq key")
